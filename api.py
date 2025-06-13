@@ -1,23 +1,14 @@
-from flask import Blueprint, request, jsonify
+from flask import request, jsonify
 import base64
 import time
 import json
 import logging
-from ai_assistant_simple import answer_question, initialize_simple_data
-from scraper import initialize_scraped_data
-from app import db
+from app import app, db
 from models import QuestionAnswer
 
 logger = logging.getLogger(__name__)
 
-api_bp = Blueprint('api', __name__, url_prefix='/api')
-
-# Initialize on first import
-initialize_scraped_data()
-initialize_simple_data()
-
-
-@api_bp.route('/', methods=['POST'])
+@app.route('/api/', methods=['POST'])
 def handle_question():
     """
     Main API endpoint to handle student questions.
@@ -57,8 +48,17 @@ def handle_question():
         
         logger.info(f"Processing question: {question[:100]}...")
         
-        # Get answer from AI assistant
-        result = answer_question(question, image_base64)
+        # Import AI assistant here to avoid circular imports
+        try:
+            from ai_assistant_simple import answer_question
+            result = answer_question(question, image_base64)
+        except ImportError:
+            # Fallback if AI assistant not available
+            result = {
+                "answer": "I'm sorry, but the AI assistant is currently unavailable. Please try again later.",
+                "links": [],
+                "response_time": 0.0
+            }
         
         # Calculate response time
         response_time = time.time() - start_time
@@ -90,7 +90,7 @@ def handle_question():
         }), 500
 
 
-@api_bp.route('/health', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
 def health_check():
     """
     Health check endpoint.
@@ -101,20 +101,28 @@ def health_check():
     })
 
 
-@api_bp.route('/stats', methods=['GET'])
+@app.route('/api/stats', methods=['GET'])
 def get_stats():
     """
     Get API usage statistics.
     """
     try:
         total_questions = QuestionAnswer.query.count()
-        avg_response_time = db.session.query(db.func.avg(QuestionAnswer.response_time)).scalar() or 0
         questions_with_images = QuestionAnswer.query.filter_by(has_image=True).count()
+        
+        if total_questions > 0:
+            avg_response_time = db.session.query(db.func.avg(QuestionAnswer.response_time)).scalar()
+        else:
+            avg_response_time = 0.0
         
         return jsonify({
             "total_questions": total_questions,
-            "average_response_time": round(avg_response_time, 2),
-            "questions_with_images": questions_with_images
+            "questions_with_images": questions_with_images,
+            "average_response_time": round(avg_response_time, 2) if avg_response_time else 0.0
         })
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error getting stats: {e}")
+        return jsonify({
+            "error": "Unable to retrieve statistics"
+        }), 500

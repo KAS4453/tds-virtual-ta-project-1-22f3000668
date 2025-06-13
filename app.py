@@ -15,11 +15,16 @@ db = SQLAlchemy(model_class=Base)
 
 # create the app
 app = Flask(__name__)
-app.secret_key = os.environ.get("SESSION_SECRET", "dev-secret-key")
+app.secret_key = os.environ.get("SESSION_SECRET")
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-# configure the database (using PostgreSQL)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
+# configure the database
+database_url = os.environ.get("DATABASE_URL")
+if not database_url:
+    # Fallback to SQLite for local development
+    database_url = "sqlite:///instance/tds_virtual_ta.db"
+
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
     "pool_recycle": 300,
     "pool_pre_ping": True,
@@ -33,9 +38,6 @@ with app.app_context():
     import models
     db.create_all()
 
-# Import and register API routes
-from api import api_bp
-app.register_blueprint(api_bp)
-
-# Import main routes
+# Import and register routes
 import routes
+import api
