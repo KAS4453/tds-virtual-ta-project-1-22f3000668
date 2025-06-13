@@ -1,259 +1,220 @@
-import json
-import os
+"""
+Simplified AI assistant without heavy ML dependencies for Replit compatibility.
+"""
 import logging
-from typing import List, Dict, Any
-from openai import OpenAI
+import os
+from typing import Dict, Any, List
 from models import ScrapedContent
 from app import db
 
 logger = logging.getLogger(__name__)
-
-# the newest OpenAI model is "gpt-4o" which was released May 13, 2024.
-# do not change this unless explicitly requested by the user
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY not found in environment variables")
-
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
 
 def simple_search(question: str, top_k: int = 5) -> List[Dict]:
     """
     Simple text-based search through scraped content using basic keyword matching.
     """
     try:
-        # Get all content from database
-        contents = ScrapedContent.query.all()
+        # Split question into keywords
+        keywords = question.lower().split()
         
-        if not contents:
-            return []
+        # Query database for content containing keywords
+        content_items = ScrapedContent.query.all()
         
-        # Simple keyword matching
-        question_words = set(question.lower().split())
-        scored_results = []
-        
-        for content in contents:
-            # Combine title and content for scoring
-            text = f"{content.title} {content.content}".lower()
+        results = []
+        for item in content_items:
+            content_lower = item.content.lower()
+            title_lower = (item.title or "").lower()
             
             # Count keyword matches
             score = 0
-            for word in question_words:
-                if len(word) > 2:  # Skip very short words
-                    score += text.count(word)
+            for keyword in keywords:
+                if keyword in content_lower:
+                    score += content_lower.count(keyword)
+                if keyword in title_lower:
+                    score += title_lower.count(keyword) * 2  # Title matches weighted higher
             
             if score > 0:
-                scored_results.append({
-                    'content': content,
-                    'score': score,
-                    'id': content.id,
-                    'url': content.url,
-                    'title': content.title,
-                    'text': content.content,
-                    'content_type': content.content_type
+                results.append({
+                    'content': item.content[:500] + "..." if len(item.content) > 500 else item.content,
+                    'title': item.title,
+                    'url': item.url,
+                    'score': score
                 })
         
         # Sort by score and return top results
-        scored_results.sort(key=lambda x: x['score'], reverse=True)
-        return scored_results[:top_k]
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:top_k]
         
     except Exception as e:
         logger.error(f"Error in simple search: {e}")
         return []
 
-
 def generate_fallback_answer(question: str, image_base64: str = None) -> Dict[str, Any]:
     """
     Generate a fallback answer using only search results when AI is unavailable.
     """
-    try:
-        # Search for relevant content
-        search_results = simple_search(question, top_k=3)
-        
-        if not search_results:
-            return {
-                "answer": "I couldn't find specific information about your question in the course materials. Please try rephrasing your question or check the course resources directly.",
-                "links": []
-            }
-        
-        # Build answer from search results
-        answer_parts = ["Based on the course materials I found:\n"]
-        relevant_links = []
+    search_results = simple_search(question)
+    
+    if search_results:
+        # Create answer from top search results
+        answer_parts = ["Based on the available course materials:\n\n"]
+        links = []
         
         for i, result in enumerate(search_results[:3], 1):
-            # Extract key information from each result
-            content_snippet = result['text'][:200] + "..." if len(result['text']) > 200 else result['text']
-            answer_parts.append(f"{i}. From '{result['title']}':")
-            answer_parts.append(f"   {content_snippet}")
-            answer_parts.append("")
-            
-            relevant_links.append({
-                "url": result['url'],
-                "text": result['title']
+            answer_parts.append(f"{i}. {result['content'][:200]}...")
+            links.append({
+                'title': result['title'] or 'Course Material',
+                'url': result['url'],
+                'relevance': min(result['score'] / 10, 1.0)
             })
         
-        if image_base64:
-            answer_parts.append("Note: I can see you've included an image, but I need AI functionality to analyze it. Please describe what's in the image so I can help better.")
+        answer_parts.append("\n\nPlease refer to the linked materials for more detailed information.")
         
         return {
-            "answer": "\n".join(answer_parts),
-            "links": relevant_links
+            'answer': '\n'.join(answer_parts),
+            'links': links,
+            'source': 'search_fallback'
         }
-        
-    except Exception as e:
-        logger.error(f"Error in fallback answer generation: {e}")
+    else:
         return {
-            "answer": "I'm having trouble accessing the course materials right now. Please try again later or contact your instructor.",
-            "links": []
+            'answer': "I couldn't find specific information about your question in the available course materials. Please try rephrasing your question or contact your instructor for assistance.",
+            'links': [],
+            'source': 'no_results'
         }
-
 
 def answer_question(question: str, image_base64: str = None) -> Dict[str, Any]:
     """
     Answer a student question using simple search and OpenAI.
     """
-    if not openai_client:
-        return generate_fallback_answer(question, image_base64)
-    
     try:
-        # Search for relevant content
-        search_results = simple_search(question, top_k=5)
+        # Check if OpenAI API key is available
+        openai_key = os.environ.get('OPENAI_API_KEY')
         
-        # Prepare context from search results
-        context_parts = []
-        relevant_links = []
-        
-        for result in search_results:
-            if result['score'] > 0:  # Only include results with some relevance
-                context_parts.append(f"Title: {result['title']}\nURL: {result['url']}\nContent: {result['text'][:500]}...")
-                relevant_links.append({
-                    "url": result['url'],
-                    "text": result['title']
-                })
-        
-        context = "\n\n---\n\n".join(context_parts) if context_parts else "No highly relevant content found in the database."
-        
-        # Prepare user message content
-        user_text = f"""Student Question: {question}
+        if openai_key:
+            # Try using OpenAI with search context
+            search_results = simple_search(question)
+            
+            try:
+                import openai
+                client = openai.OpenAI(api_key=openai_key)
+                
+                # Prepare context from search results
+                context = ""
+                if search_results:
+                    context = "\n\n".join([f"- {result['content'][:300]}" for result in search_results[:3]])
+                
+                # Create prompt
+                prompt = f"""You are a helpful teaching assistant for a data science course. Answer the student's question based on the provided course materials.
 
-Relevant Course Content and Discussions:
+Course Materials Context:
 {context}
 
-Please provide a helpful answer to the student's question based on the above context."""
-        
-        # Prepare messages for OpenAI
-        messages = [
-            {
-                "role": "system", 
-                "content": """You are a helpful Teaching Assistant for the Tools in Data Science course at IIT Madras. 
+Student Question: {question}
 
-Your task is to answer student questions based on the provided course content and discourse discussions.
+Please provide a clear, helpful answer. If the context doesn't contain enough information, acknowledge this and provide general guidance."""
 
-Guidelines:
-1. Provide accurate, helpful answers based on the context provided
-2. If the question involves choosing between models (like GPT versions), refer to the specific requirements mentioned in the course materials
-3. Be concise but comprehensive
-4. If you cannot find relevant information in the context, say so clearly
-5. Focus on practical, actionable advice for students
-
-Respond with a clear, helpful answer that addresses the student's question directly."""
-            }
-        ]
-        
-        # Add image support if provided
-        if image_base64:
-            user_text += "\n\nNote: The student has also provided an image/screenshot. Please analyze it in context of their question."
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": user_text
-                    },
-                    {
-                        "type": "image_url", 
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }
-                    }
-                ]
-            })
+                # Handle image if provided
+                messages = [{"role": "user", "content": prompt}]
+                
+                if image_base64:
+                    messages = [{
+                        "role": "user", 
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                            }
+                        ]
+                    }]
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    max_tokens=1000,
+                    temperature=0.7
+                )
+                
+                answer = response.choices[0].message.content
+                
+                # Prepare links from search results
+                links = []
+                for result in search_results[:5]:
+                    links.append({
+                        'title': result['title'] or 'Course Material',
+                        'url': result['url'],
+                        'relevance': min(result['score'] / 10, 1.0)
+                    })
+                
+                return {
+                    'answer': answer,
+                    'links': links,
+                    'source': 'openai_with_search'
+                }
+                
+            except Exception as e:
+                logger.error(f"OpenAI API error: {e}")
+                # Fall back to search-only answer
+                return generate_fallback_answer(question, image_base64)
         else:
-            messages.append({
-                "role": "user",
-                "content": user_text
-            })
-        
-        # Get response from OpenAI
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",  # the newest OpenAI model is "gpt-4o"
-            messages=messages,
-            max_tokens=1000,
-            temperature=0.1
-        )
-        
-        answer = response.choices[0].message.content or "I couldn't generate a response."
-        
-        # Filter and rank links based on relevance
-        final_links = rank_and_filter_links(relevant_links, question, answer)
-        
-        return {
-            "answer": answer,
-            "links": final_links[:3]  # Return top 3 most relevant links
-        }
-        
-    except Exception as e:
-        logger.error(f"Error answering question: {e}")
-        # Fallback to simple search-based answer if AI fails
-        if "quota" in str(e).lower() or "insufficient" in str(e).lower():
+            # No OpenAI key available, use search-only
             return generate_fallback_answer(question, image_base64)
+            
+    except Exception as e:
+        logger.error(f"Error in answer_question: {e}")
         return {
-            "answer": f"Sorry, I encountered an error while processing your question: {str(e)}",
-            "links": []
+            'answer': "I'm sorry, but I'm experiencing technical difficulties. Please try again later or contact your instructor for assistance.",
+            'links': [],
+            'source': 'error'
         }
-
 
 def rank_and_filter_links(links: List[Dict], question: str, answer: str) -> List[Dict]:
     """
     Rank and filter links based on relevance to the question and answer.
     """
-    if not links:
-        return []
-    
-    # Simple ranking based on keyword matching
-    question_lower = question.lower()
-    answer_lower = answer.lower()
-    
-    scored_links = []
-    for link in links:
-        score = 0
-        title_lower = link['text'].lower()
-        
-        # Score based on title relevance
-        question_words = question_lower.split()
-        for word in question_words:
-            if len(word) > 3 and word in title_lower:
-                score += 1
-        
-        # Check if link is mentioned in answer
-        if link['url'] in answer or link['text'].lower() in answer_lower:
-            score += 2
-        
-        scored_links.append((link, score))
-    
-    # Sort by score and return
-    scored_links.sort(key=lambda x: x[1], reverse=True)
-    return [link for link, score in scored_links if score > 0]
-
+    # Simple ranking based on existing relevance scores
+    return sorted(links, key=lambda x: x.get('relevance', 0), reverse=True)[:5]
 
 def initialize_simple_data():
     """
     Initialize the database with sample data if needed.
     """
     try:
-        # Import and run the scraped data initialization
-        from scraper import initialize_scraped_data
-        initialize_scraped_data()
-        logger.info("Simple data initialization completed")
+        if ScrapedContent.query.count() == 0:
+            logger.info("Initializing database with sample course content...")
+            
+            sample_content = [
+                {
+                    'title': 'Introduction to Data Science',
+                    'content': 'Data science is an interdisciplinary field that uses scientific methods, processes, algorithms and systems to extract knowledge and insights from structured and unstructured data.',
+                    'url': 'https://example.com/intro-ds',
+                    'content_type': 'course'
+                },
+                {
+                    'title': 'Machine Learning Basics',
+                    'content': 'Machine learning is a subset of artificial intelligence that provides systems the ability to automatically learn and improve from experience without being explicitly programmed.',
+                    'url': 'https://example.com/ml-basics',
+                    'content_type': 'course'
+                },
+                {
+                    'title': 'Python for Data Analysis',
+                    'content': 'Python is a powerful programming language for data analysis. Key libraries include pandas for data manipulation, numpy for numerical computing, and matplotlib for visualization.',
+                    'url': 'https://example.com/python-data',
+                    'content_type': 'course'
+                }
+            ]
+            
+            for content_data in sample_content:
+                content = ScrapedContent(
+                    title=content_data['title'],
+                    content=content_data['content'],
+                    url=content_data['url'],
+                    content_type=content_data['content_type']
+                )
+                db.session.add(content)
+            
+            db.session.commit()
+            logger.info("Sample content added to database")
+            
     except Exception as e:
-        logger.error(f"Error initializing simple data: {e}")
+        logger.error(f"Error initializing sample data: {e}")
