@@ -22,6 +22,8 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 database_url = os.environ.get("DATABASE_URL")
 if not database_url:
     # Fallback to SQLite for local development
+    import os
+    os.makedirs('instance', exist_ok=True)
     database_url = "sqlite:///instance/tds_virtual_ta.db"
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
@@ -33,11 +35,17 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 # initialize the app with the extension
 db.init_app(app)
 
-with app.app_context():
-    # Import models and create tables
-    import models
-    db.create_all()
-
-# Import and register routes
+# Import models and routes
+import models
 import routes
 import api
+
+# Initialize database tables
+with app.app_context():
+    try:
+        db.create_all()
+        # Initialize sample data
+        from ai_assistant_simple import initialize_simple_data
+        initialize_simple_data()
+    except Exception as e:
+        app.logger.error(f"Database initialization error: {e}")
