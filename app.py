@@ -23,8 +23,10 @@ database_url = os.environ.get("DATABASE_URL")
 if not database_url:
     # Fallback to SQLite for local development
     import os
-    os.makedirs('instance', exist_ok=True)
-    database_url = "sqlite:///instance/tds_virtual_ta.db"
+    db_dir = os.path.join(os.getcwd(), 'instance')
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, 'tds_virtual_ta.db')
+    database_url = f"sqlite:///{db_path}"
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
