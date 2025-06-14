@@ -21,18 +21,23 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 # configure the database
 database_url = os.environ.get("DATABASE_URL")
 if not database_url:
-    # Fallback to SQLite for local development
-    import os
-    db_dir = os.path.join(os.getcwd(), 'instance')
-    os.makedirs(db_dir, exist_ok=True)
-    db_path = os.path.join(db_dir, 'tds_virtual_ta.db')
-    database_url = f"sqlite:///{db_path}"
+    # For local development, use SQLite; for Vercel, use in-memory
+    if os.environ.get("VERCEL"):
+        database_url = "sqlite:///:memory:"
+    else:
+        import os
+        db_dir = os.path.join(os.getcwd(), 'instance')
+        os.makedirs(db_dir, exist_ok=True)
+        db_path = os.path.join(db_dir, 'tds_virtual_ta.db')
+        database_url = f"sqlite:///{db_path}"
 
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_recycle": 300,
-    "pool_pre_ping": True,
-}
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+if not os.environ.get("VERCEL"):
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_recycle": 300,
+        "pool_pre_ping": True,
+    }
 
 # initialize the app with the extension
 db.init_app(app)
